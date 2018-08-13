@@ -1,0 +1,19 @@
+
+wd <- "~/00_SR-lab-data/genotype/gap-fromMaria/analyses/"
+setwd(wd)
+
+
+x<-read.table("G1K-overlapping-GAP-cmh-201705.lmiss",h=T,stringsAsFactors = F)
+ylabels=c("0","20K","40K","60K","80K","100K")
+xlabels=c("0.0001","0.001","0.01","0.1","1")
+#par(mfrow=c(1,1))
+pdf("PFD-G1K-GAP-merged-clean-lmiss.pdf",width=10,height=7)
+hist(log10(x$F_MISS),axes=F,xlim=c(-4,0),col="RED",ylab="Number of SNPs",xlab="Fraction of missing data",main="All SNPs",ylim=c(0,100000))
+axis(side=2,labels=F)
+mtext(ylabels,side=2,las=2, at=c(0,20000,40000,60000,80000,100000),line=1)
+axis(side=1,labels=F)
+mtext(xlabels,side=1,at=c(-4,-3,-2,-1,0),line=1)
+abline(v=log10(0.05),lty=2)
+dev.off()
+q()
+n
