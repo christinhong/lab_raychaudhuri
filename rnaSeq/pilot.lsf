@@ -1,0 +1,57 @@
+#!/bin/bash
+
+#BSUB -cwd "/data/srlab/cmhong/data/test"
+
+#BSUB -u christin.cmh@gmail.com
+#BSUB -J RNA-01-ASE
+#BSUB -o aa_RNA-01-ASE_output.txt
+#BSUB -e aa_RNA-01-ASE_errors.txt
+
+#BSUB -q big-multi
+#BSUB -n 4
+#BSUB -M 40000
+#BSUB -R 'rusage[mem=40000]' 
+
+	
+#####
+
+# GLOBAL VARIABLES
+	# Bash variables are untyped by default.  For more robust code, can declare data type with [declare].  See http://tldp.org/LDP/abs/html/declareref.html
+
+intCPUS=4
+pathApps=/data/srlab/cmhong/apps
+pathRef=/data/srlab/cmhong/ref-hg19 # Contains 1) reference genome, 2) GTF annotation file, and 3) table of Ensembl gene IDs and names from GTF annotation file
+
+# Apps with the versions in their respective PATHs set to global variables
+
+
+# Other apps used in this script:
+# 
+
+
+# Variables set to pipe-wide values.  WARNING: These values are called in downstream scripts - changing will break pipe!
+
+#####
+
+echo $(date +%Y%m%d)
+
+#####
+
+#Variant Caller
+#runs star pass 2 mapping
+#runs pre-processing for GATK
+#runs hapCaller by merging files by chromosome
+
+
+#parameters to change
+suffixSamples=ASE
+fastq1={cut -f2 < "00_Targets2.csv"} #assumes it is in working dir and tab-delimited
+#check ref star genome is still OK for run_star_pass1.sh
+
+#shortcuts
+parallel=$pathApps/parallel-20150822/src/parallel
+
+#STAR
+$parallel --xapply echo :::: $fastq1
+
+

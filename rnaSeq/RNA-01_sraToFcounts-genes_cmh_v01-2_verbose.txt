@@ -1,0 +1,608 @@
+#!/bin/bash
+
+#BSUB -cwd "/data/srlab/cmhong/data/test"
+
+#BSUB -u christin.cmh@gmail.com
+#BSUB -J RNA-01_sraToFc
+#BSUB -o aa_RNA-01_output_$(date +%Y%m%d).txt
+#BSUB -e aa_RNA-01_errors_$(date +%Y%m%d).txt
+
+#BSUB -q big-multi
+#BSUB -n 8
+#BSUB -M 40000
+#BSUB -R 'rusage[mem=40000]' 
+
+#####
+
+# Christin M. Hong
+# Last modified: 2015-08-30
+# Soumya Raychaudhuri Lab, Harvard Medical School
+
+# Bash script for processing human RNA-seq data as a job on the ERISOne Partners cluster.
+	# Input: SRA files in working directory and Targets file (see README)
+	# Processes run: fastq-dump, FastQC, subjunc, and featureCounts.
+		# UCSC reference genome v19 and Gencode annotation, meta-feature level.
+
+# @CODE = tag for optional or one-time code
+	
+#####
+
+# GLOBAL VARIABLES
+
+intCPUS=8
+fileFcOutput=aa_RNA-01_fcOutput_$(date +%Y%m%d).txt
+fileFcCounts=aa_RNA-01_fcCounts.txt
+pathApps=/data/srlab/cmhong/apps
+pathRef=/data/srlab/cmhong/ref-hg19 # Contains reference genome, GTF annotation file, and table of Ensembl gene IDs and names from GTF annotation file
+
+# Apps with the versions in their respective PATHs set to global variables
+subread=subread-1.4.6-p4-Linux-x86_64
+fastQC=fastQC-0.11.3
+sraToolKit=sratoolkit.2.5.2-ubuntu64
+
+
+# WARNING: These values are called in downstream scripts - changing will break pipe!
+fileTargets=aa_RNA-01_Targets.txt
+fileFcCountsNames=aa_RNA-01_fcCountsNames.txt 
+
+
+# Notes
+	# Bash variables are untyped by default.  For more robust code, can declare data type with [declare].  See http://tldp.org/LDP/abs/html/declareref.html
+	# Named in lower camelCase to easily distinguish from script language.
+
+
+#####
+
+# README
+
+# TOC
+	# MANUALLY CHANGE FOR THIS CODE
+	# TARGETS FILE
+	# ANALYZING A MIX OF SINGLE AND PAIRED READ SAMPLES (don't do it)
+	# APPS
+	# TIME ESTIMATE
+	# ADDITIONAL NOTES
+	# ON NAMING
+	# PLANS FOR NEXT VERSION
+
+
+
+# MANUALLY CHANGE FOR THIS CODE
+	# 1. Set working directory (line 3, "#BSUB -cwd").
+	# 2. Set values for global variables and adjust any unusual arguments for commands, if necessary.
+	# 3. Build the external TAB-DELIMITED Targets file.
+	# 4. Have all SRA files and Targets file in the working directory (no subdirectories).
+	# 5. If necessary, rename actual system folders and files to remove whitespaces and special characters from the path of the working directory, any paths coded in the global variables, and the names of any files used here.
+
+
+
+# TARGETS FILE
+
+# The Targets file can also be used downstream for voom {limma} in RStudio.  It needs to be TAB-DELIMITED with no whitespaces or special characters in path/file names (or else the Subread functions will break).  If necessary, rename files (with another script) to remove special characters before running this script.
+
+# Example extract of Targets file with single-read data (empty Read2 column):
+	# Group	Read1	Read2	Aligned
+	# H0	SRR1786581.sra.fastq		HC1-0.bam 
+
+# Column 1: Primary group assignment (can always add another column with alternative groupings later in RStudio).
+
+# Columns 2 and 3: Read files in FASTQ (or other subjunc input compatible) format.  Forward reads in Read1, reverse in Read2.  If using an alternative orientation for paired reads, will need to manually edit the subjunc command, because it's set to -S fr.
+	# !IMPORTANT!: This script is coded such that featureCounts decides whether to summarize for paired or single reads based on the FIRST value for column Read2.  Be sure to check output to confirm that the correct featureCount command was run!
+
+# Column 4: Aligned BAM file names.  BAM files will be generated with these names later by subjunc.
+
+
+
+# ANALYZING A MIX OF SINGLE AND PAIRED READ SAMPLES
+
+# If, for some unfortunate reason I have to work with a mix of single and paired read data, it's currently necessary to keep them in separate directories, build separate Targets files, and process them through different jobs.
+
+# The featureCounts script is coded to check for the existence of a Read2 file in Sample 1 as the deciding factor in whether to run for either paired or single reads for ALL samples.
+
+# This built-in requirement for separation is deliberate.  I considered coding a loop parallel to the subjunc one, such that featureCounts would summarize 1 file at a time with a conditional test for paired vs. single reads, then concatenate the output files.  But considering how much variation occurs just from this technical difference, I prefer to keep single and paired reads separate as much as possible.  If required to pool, I think it's better to do the necessary normalization at the very end, after data analysis.
+	# (Of course, if it's REALLY necessary, can always find a way to code building separate featureCount analyses for paired vs. single, especially if data is built into Targets file.  But there's currently no need for that.)
+
+
+
+# APPS
+
+# I stored the full paths to the apps in this script rather than adding the directories to PATH because this will provide a record of the app versions.
+
+# Apps in this script with global variables in their paths:
+	# subread
+	# fastQC
+	# sraToolKit
+
+# Apps in this script that aren't set to global variables:
+	# twoBitToFa
+
+
+
+# TIME ESTIMATE
+
+# Probably safe to estimate 15 minutes/GB of SRA (or 1.7 minutes/GB of FASTQ) for single read data.
+	# This scales linearly for at least 27 initial files of ~the same size.
+
+# Paired read data takes a little longer - featureCounts for two reads as single takes about 2 minutes, while aligning them as paired takes 5.5 minutes - but if running overnight, that's negligable.
+
+# Sample time output for single-read data, starting from 2 x 850 MB SRA files (7.3 GB FASTQ files):
+
+# Resource usage summary:
+
+#    CPU time   :   5787.42 sec.
+#    Max Memory :      7452 MB
+#    Max Swap   :      8147 MB
+
+#    Max Processes  :         4
+#    Max Threads    :        28
+
+	# 5787.42 sec. CPU time / 4 processes = 1446.86 sec. = 24.11 minutes
+
+
+
+# ADDITIONAL NOTES
+
+# It's a good idea to pilot code on 2-3 samples before running on a large number of samples.  In particular, check for:
+	# code completion, 
+	# no whitespaces or special characters in path/file names,
+	# FastQC output (in fastqc subdirectory), particularly base and read quality scores, 
+	# % of reads mapped by subjunc (~85%, in error.txt), 
+	# % successfully assigned by featureCounts (~75%, in error.txt), and 
+	# that paired/single read recognition for subjunc and featureCounts is correct (in output.txt).
+
+# Note on script debugging: Every function should have an output (at least an echo) to make it easier to identify the location of an error.
+
+# Script is in bash to support use of Subread on ERISOne Partners cluster.
+
+# Can't make new directories from script on the cluster due to permission issues (weird), so all output will be in working directory.
+
+# This code is heavily commented because 1) I'm an absolute beginner to bioinformatics/bash, 2) I dislike having to search around to find what something means, and 3) I like being able to go back 5 years later and understand what I did.  For quick skimming, I'm happy to rely on gedit's syntax coloring for differentiating code from comments.
+	# BUT, for the sake of other people, I'll maka a brief version and move most of these comments to a documentation file.
+
+
+# Optional code in this file is flagged with @CODE.  It's usually either sample code for something that needs to be done before running this script or code that only needs to be run once per user.
+
+
+
+# ON NAMING
+# (see http://exadox.com/en/articles/file-naming-convention-ten-rules-best-practice)
+
+# I like to name files by:
+	# [sorting factor]_[general content description]_[first-last author]_[useful specific descriptions]
+	# with CamelCase or dashes within the elements to separate words, and 1-2 words per field.
+
+# For datasets, [sorting factor] usually YYYY-MM I started working with the data.
+# For scripts, [sorting factor] usually [data source for script]-[# of script in workflow from 00-99]-[workflow abbreviation]
+	# Example data sources
+		# RNA: RNA-seq
+		# ChIP: ChIP-seq
+	# Example workflow abbreviations
+		# DE: Differential expression
+		# ASE: Allelic-specific expression
+# For files generated from scripts, [double letters, e.g. aa]_[script sorting factor].
+	# Some languages/apps have issues when a file begins with a number or special character, so I direct sorting with double letters.
+	# This also essentially becomes a flag for script-specific output, so I use the double letters to distinguish the order of scripts run.  E.g. for RNA-seq data, I may have one script for analyzing featureCounts data for DE (RNA-02-DE) and another for ASE (RNA-02-ASE).  Both can be run immediately after processing files with my RNA-01 script, so both start with RNA-02.  Changing the prefix to align with script order allows distinguishing which script I ran first (so if I do DE first, those files will be prefixed with bb, the ASE-generated files with cc).
+	# Of course, the order of data analysis shouldn't have any effect on the output, so this may be entirely unnecessary, but the point of documentation is to catch things that shouldn't matter.  ;)
+
+
+
+# PLANS FOR NEXT VERSION
+	# 1. Force more robust code with "unofficial bash strict mode" - doesn't really matter here, but it's important to develop good practices.  See http://redsymbol.net/articles/unofficial-bash-strict-mode/ and http://kvz.io/blog/2013/11/21/bash-best-practices/.
+
+	# 2. Script for downloading all desired SRAs and transferring to working directory (depending on cluster permissions, may need to run directly on cluster through an interactive session).
+	
+	# 3. Auto-creation of tab-delimited Targets file after fastq-dump (set global variables to fill Groups in the same sort order as the sample files; if *_2.fastq exists grep *_1.fastq then *_2.fastq, else *.fastq; add Aligned column with Aligned (colname)_group-#_fastqBasename; check that all columns contain the same number of lines, or else echo error and exit $?).
+		# If it makes sense, set identifiers for paired reads as global variables.
+		
+		# See http://stackoverflow.com/questions/3856747/check-whether-a-certain-file-type-extension-exists-in-directory (birryree)
+		# myarray=(`find ./ -maxdepth 1 -name "*.py"`)
+		# if [ ${#myarray[@]} -gt 0 ]; then 
+		#    echo true 
+		# else 
+		#    echo false
+		# fi
+		
+		# # -maxdepth 1 limits search to current directory; otherwise bash would look in child directories by default.
+		# # ERISOne cluster was giving me an issue when using "./".  I suspect that despite setting the working directory, when submitted as a job, the working directory != source directory.  Better to either omit ./ or use full path.
+			# This is probably also why I couldn't make new directories.  May try again next time with full path to new directory.  (Should make a section on ERISOne Partners Cluster quirks in cluster protocol...)
+		# # Also, when actually coding, avoid use of backticks.  They seem to be invitations for trouble, if only because they're hard for people to distinguish from single quotes when debugging (see http://unix.stackexchange.com/questions/5778/whats-the-difference-between-stuff-and-stuff).  Pipes are great.
+		
+	# 4. Use of GNU parallel for running subjunc.
+	# 5. Set command options for subjunc and featureCounts under a global variable (e.g. Mark Ziemann).
+	# 6. Change sed to tail if simply removing the first line of the fcOutput file - there's a note somewhere on StackOverflow that tail is faster.
+
+
+
+#####
+
+# DOWNLOADING AND UPLOADING FILES
+
+# This time I downloaded and uploaded everything one file at a time, but can probably download directly onto the cluster by installing and running ncftp from the cluster.  
+
+# I'm also sure there's a faster way of downloading multiple files...maybe if I can define the download tree, e.g. "open ftp://ftp-trace.ncbi.nlm.nih.gov/sra/sra-instant/reads/ByExp/sra/SRX%2FSRX865%2FSRX865093:SRX865119"?
+# See http://www.ncbi.nlm.nih.gov/books/NBK158899/, http://www.ncftp.com/ncftp/doc/ncftp.html, and https://www.biostars.org/p/51354/.  Will look into this next time.
+
+
+
+# Download SRA files from GEO with ncftp.  GEO recommends setting buffer size for faster downloads.  After opening ftp link with ncftp:
+	# @CODE set so-bufsize 33554432
+
+
+# Can upload files into the desired directory on the cluster with rsync.  (rsync has the nice advantage of automatically confirming checksums.)
+	# E.g. rsync from directory containing SRA files:
+		# @CODE rsync -avzs --progress *.sra  ch961@erisone.partners.org:/data/srlab/cmhong/data/2015-08_RNA_Hirahara-OShea_stat1
+
+# If just updating Targets file, it's faster to copy over into virtual drive than run rsync.  But if a file's >50 MB, probably worth using rsync, if only for the checksum.
+
+
+#####
+
+# USING THE ERISONE PARTNERS CLUSTER
+
+# Brief version.  May write a more detailed protocol on setting up and using the cluster later.
+
+
+# Log on from CL with
+	# @CODE ssh [username]@erisone.partners.org
+
+# Upload script to home directory.
+
+# Run this script on cluster with:
+	# @CODE bsub < ~/[name of script.lsf]
+		# Check submission with "bjobs" command.
+			# Can kill jobs with "kill [job ID]".
+
+
+
+#####
+
+# BUILDING REFERENCE GENOME HG19
+
+# Only needs to be done once per user, then can be read by all future scripts.
+
+
+# If needed for index (reference genome), download hg19 (human genome v19) with ncftp from the UCSC Genome Browser to directory ref-hg19 (or whatever you want to call your reference directory).  See directions here: http://hgdownload.cse.ucsc.edu/goldenpath/hg19/chromosomes/
+	# Using hg19 because as of August 2015, it's better annotated and has a lot of historical data, whereas the newer hg38 is still being vetted.
+
+
+# Download matching annotation file (v19) from Gencode to reference genome directory: http://www.gencodegenes.org/releases/current.html
+	# I've only used the Comprehensive gene annotation for chromosomal regions only, GTF format.
+	# Using the wrong version will result in a very low % (e.g. 15%) of reads mapping with featureCounts.
+
+
+#  To decompress the .2bit file into a fasta file, download twoBitToFa from http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/twoBitToFa and upload to personal apps directory in cluster.
+
+
+# Convert twoBitToFa to an executable
+	# @CODE chmod a+x twoBitToFa 
+# Run twoBitToFa
+	# @CODE ${pathApps}/twoBitToFa "hg19.2bit" "hg19.fa" 
+
+
+# Build index with:
+	# @CODE ${pathApps}/${subread}/bin/subread-buildindex -M 36000 -o hg19-index hg19.fa
+		# TIME ESTIMATE: ~17 minutes with 16 GB RAM.
+
+
+#####
+
+# MAKE TABLE OF ENSEMBL GENE IDS AND NAMES FROM GTF ANNOTATION FILE
+
+# Only needs to be done once per user, then can be read by all future scripts.
+
+# Makes it easier to get an idea of what's going on immediately after processing data...though all the genes will probably need to be looked up anyway.  ;)  Adapted from http://genomespot.blogspot.com/2015/01/generate-rna-seq-count-matrix-with.html (Mark Ziemann)
+
+
+# Check column order of annotation file.
+	# @CODE head ${pathRef}/gencode-v19-chr.gtf > gencode-v19-chr-head.txt
+
+# Open in LibreOffice Calc as a double quotes (") delimited file.  Find column numbers for gene_id and gene_name.  For the Gencode annotation for hg19, it's 2 and 10, respectively. 
+
+
+# Select only lines with the full word "gene" in the file with grep and pipe to cut.
+# Using " as a delimiter, extract columns 2 and 10 with cut.
+# Pipe output of cut to tr to replace " with tabs.
+# Sort lines on field 1 (gene_id) while ignoring leading and trailing whitespace (b option), character 1.
+# Record results in TXT.
+
+	# @CODE grep -w gene ${pathRef}/gencode-v19-chr.gtf | cut -d '"' -f2,10 | tr '"' '\t' | sort -k 1b,1 > ${pathRef}/hg19EnsGeneID_GeneName.txt
+
+
+#####
+
+# DECOMPRESSING SAMPLE SRA FILES TO FASTQ
+
+for i in *.sra ; 
+	do ${pathApps}/${sraToolKit}/bin/fastq-dump --split-3 -A ${i} ; 
+done
+
+
+# If needed, uncomment to erase SRA files (UNTESTED).
+# rm -f *.sra
+
+
+# Notes
+	# The --split-3 flag ensures that each read direction has its own file.  If data has more than one read per sample (e.g. paired ends), then dropping the --split-3 flag will result in the reads being concatenated together instead of being split into two FASTQ files.
+
+# Bash note to self: Semi-colons and returns (line breaks/newlines) are both recognized as command separators, so the semi-colons at the end of the lines above are superfluous.  But I left them in this time to remind myself that they're an option.  (The whitespace generated by newlines makes the code easier to read, but I think it's also easier to accidentally mess up than a compact line of code.)
+	# Can use && instead of ; to only run the second command if the first is successful (but there's no second command here).
+
+
+# TIME ESTIMATE
+
+# For 27 x 1-2 GB files:
+# Resource usage summary:
+
+#    CPU time   :   6642.00 sec.
+#    Max Memory :        30 MB
+#    Max Swap   :       263 MB
+
+#    Max Processes  :         4
+#    Max Threads    :         5
+
+	# 6642 seconds = 110.7 minutes / 4 processes = 27.68 minutes
+
+
+
+#####
+
+# FASTQ TO CHECK QUALITY OF READ LIBRARIES
+
+# See documentation here: http://www.bioinformatics.babraham.ac.uk/projects/fastqc/
+
+
+# The first time I used the program, I needed to run:
+	# @CODE chmod a+x ${pathApps}/${fastQC}/fastqc
+		# before running fastqc to flag fastqc as an executable.  Otherwise I kept getting a "Permission Denied" error.
+
+
+# Test for non-existence of output subdirectory and make subdirectory for output if non-existence is TRUE.  (-p is necessay for POSIX systems, but may get error if running script on Windows?)
+
+
+# Run fastqc.
+
+${pathApps}/${fastQC}/fastqc *.fastq --threads ${intCPUS}
+
+
+# Arguments
+	# --threads: "Specifies the number of files which can be processed simultaneously.  Each thread will be allocated 250MB of memory so you shouldn't run more threads than your available memory will cope with, and not more than 6 threads on a 32 bit machine."
+
+
+# TIME ESTIMATE
+
+# For 27 x 1-2 GB files:
+# Resource usage summary:
+
+#    CPU time   :   4165.74 sec.
+#    Max Memory :       311 MB
+#    Max Swap   :      3421 MB
+
+#    Max Processes  :         4
+#    Max Threads    :        28
+
+	# 4165.74 seconds = 69.43 minutes / 4 processes = 17.36 minutes
+
+
+#####
+
+# ALIGNING READS WITH SUBJUNC {SUBREAD}
+
+# This is the longest step in the process.  Run overnight if possible.
+
+# NOTE: If I wind up batch downloading read libraries such that every library has its own directory, I'll probably need to add a "Dir" column to my Targets file and fiddle with the subjunc loop to 1) find the correct directory for each library, 2) output the bam files to a specific subdirectory such that all the bam files are together, and 3) modify the working directory of the featureCounts script accordingly.  Auto-populating the Targets file will be essential then.  But for this first run, this is fine.
+
+
+# CONVERT TARGETS FILE TO BASH ARRAYS
+
+# Adapted from http://stackoverflow.com/questions/17137269/bash-take-nth-column-in-a-text-file (jm666 and ganessh) and http://superuser.com/questions/759309/bash-use-columns-separate-in-an-array (Hastur)
+
+
+# First, test whether the version of bash supports arrays.
+
+testArray[0]='test' || (echo 'Error: Arrays not supported in this version of
+bash.  Time to update?' && exit 2)
+
+#####
+# Transfer Read1 (column 2 = field 2), Read2, and Aligned columns to their own TXT files.  (This works because POSIX systems read from left to right.)
+
+cut -f2 < ${fileTargets}  >  aa_fq1.txt
+cut -f3 < ${fileTargets}  >  aa_fq2.txt
+cut -f4 < ${fileTargets}  >  aa_bam.txt
+
+
+# Use readarray to read the TXT file and store values in a 1D vector (as of August 2015, bash only supports 1D vectors).
+
+readarray -t fq1 < aa_fq1.txt
+readarray -t fq2 < aa_fq2.txt
+readarray -t bam < aa_bam.txt
+
+
+# If needed, uncomment to erase the temporary files created in the script.
+# rm aa_fq1.txt aa_fq2.txt aa_bam.txt
+
+
+# Notes
+	#-f for field (field separation by tabs is the default, otherwise would need to add -d'[delimiter]' ).
+	# The cut is much faster for large files as a pure shell solution. If your file is delimited with multiple whitespaces, you can remove them first, like: 
+		# sed 's/[\t ][\t ]*/ /g' < datafile.txt | cut -d' ' -f3,5
+		# where the (gnu) sed will replace any tab or space characters with a single space.
+	# I tried some methods to skip the TXT middleman and assign the column directly to an array (including pipes), but it kept returning an empty array.  I think there's a data type issue - can't add a list directly to a bash array; need to add values to array one by one, which would require coding a loop.  This method may be less efficient, but it's simpler.
+
+
+
+# RUN SUBJUNC LOOP ON TARGETS PSEUDO-ARRAY
+
+i=1 ;
+for item in "${fq1[@]}" ; do
+	if [[ -n "${fq2[i]}" ]] ; then
+		echo "Detected value for Read2.  Aligning for PAIRED reads."
+		${pathApps}/${subread}/bin/subjunc -i ${pathRef}/hg19-index -r ${fq1[${i}]} -R ${fq2[${i}]} -o ${bam[${i}]} -u -H --BAMoutput -d 0 -D 1000000 --allJunctions -T ${intCPUS} -S fr
+	else
+		echo "Did not detect value for Read2.  Aligning for SINGLE reads."
+		${pathApps}/${subread}/bin/subjunc -i ${pathRef}/hg19-index -r ${fq1[${i}]} -o ${bam[${i}]} -u -H --BAMoutput -d 0 -D 1000000 --allJunctions -T ${intCPUS}
+	fi
+	let "i=i+1"
+done
+
+echo "This script currently runs an extra loop that tries to align SINGLE reads at the end.  This is because it reads the 'done' at the end of the loop as a value for Read1."
+echo "" # Insert newline between output messages.
+
+
+# Notes
+	# This loop is necessary because C version of subjunc can only align 1 sample at a time, and R currently has limited cluster support.
+
+	# Set i (initial value) to 1 because i=0 is the row of column names.
+	# Subjunc on the cluster doesn't like single or double quotes in the command - using -R "${fq2[$i]}" causes the process to abort after "The input file contains base space reads" (never gets to "Load the 1-th index block...").  But if ${fq2[$i]} = null, the -R flag will take the next character as its input.  So I added an if-else switch.
+		# [ -n "${fq2[i]}" ] tests if there's a value in the Read2 column (something not 0 or null).  If true, it runs the command for paired data.  If false, it runs the single-read version of subjunc.  Both options print messages stating what ran.
+ 
+	# The loop for is made on for each component of the 1D vector fq1. It should be done taking each vector because they all have the same size. It should be done using Nlines.
+	# In the not used variable item inside the loop there is always the same value of fq1[i].
+	# You access directly the component you want of the array.  (The first index is 0 and the last is Nlines-1.)
+	# You increase the value of i at each iteration of the for loop.
+	
+
+# Arguments (C/R version)
+	# -i/index: specify location and base name (not file!) of index.  Base name here is hg19-index.
+	# -r/readfile1: First FASTQ file
+	# -R/readfile2: Second FASTQ if paired-end (from both cDNA strands), otherwise NULL.
+	# MOST IMPORTANT OPTION is -u/unique: Only maps reads to one location.  When a read maps to multiple locations, the location that best fits is chosen.
+	# If a read maps to multiple locations with the same best fit score, choosing between them is determined by either tieBreakQS (FALSE by omitting -Q) and tieBreakHamming (TRUE by including -H).
+	# --BAMoutput: BAM is a binary version of SAM, making it smaller and easier to work with.
+	# -d/minFragLength and -D/maxFragLength refer to the length of the template fragment in bp (e.g. in case mRNA is spanning exon-exon junctions).  Kam sets the minFragLength to 0 and max to 1e6.
+	# --allJunctions/reportAllJunctions is recommended to be set as TRUE for RNA-seq data in order to report junctions that don't have required donor/receptor sites (GT/AG), cross different chromosomes, or are located on different strands within the same chromosome, as well as canonical exon-exon junctions.
+	# -T/nthreads: Specify number of threads/CPUs for mapping (1-32, 1 by default).
+	# -S/PE_orientation fr: For paired reads.  Specifies which read of the pair is first and second; fr (forward reverse) is default.
+	# See other default values in Subread manual.
+
+
+# TIME ESTIMATE
+
+# For 27 x 1-2 GB files:
+# Resource usage summary:
+
+#    CPU time   : 122843.78 sec.
+#    Max Memory :      7542 MB
+#    Max Swap   :      8194 MB
+
+#    Max Processes  :         4
+#    Max Threads    :        13
+
+	# 122843.78 seconds = 2047.40 minutes = 34.12 hours
+		# But this finished within 11 hours (left it overnight), so I'm not sure how the cluster is calculating CPU time...  Every individual 1-2 GB file took 12-25 minutes to align, so I'm guessing the whole job took 34.12 hours / 4 processes = 8.53 hours.
+
+# About 85-90% of the reads were mapped.
+
+
+#####
+
+# SORT AND SUMMARIZE READS WITH FEATURECOUNTS {SUBREAD}
+
+
+# Test for non-existence of output subdirectory and make subdirectory for output if non-existence is TRUE.  (-p is necessay for POSIX systems, but may get error if running script on Windows?)
+
+
+# Summarize aligned files.
+
+if [[ -n "${fq2[1]}" ]] ; then 
+	echo "Detected value for Read2, Sample 1.  Summarizing for PAIRED reads."
+	${pathApps}/${subread}/bin/featureCounts ${bam[@]:1} -T ${intCPUS} -a ${pathRef}/gencode-v19-chr.gtf -Q 20 -o ${fileFcOutput} -p
+else
+	echo "Did not detect value for Read2, Sample 1.  Summarizing for SINGLE reads."
+	${pathApps}/${subread}/bin/featureCounts ${bam[@]:1} -T ${intCPUS} -a ${pathRef}/gencode-v19-chr.gtf -Q 20 -o ${fileFcOutput}
+fi
+
+echo "" # Insert newline between output messages.
+
+
+# Notes
+	# Using same Targets pseudo-array generated earlier in this script for subjunc.
+	# featureCounts can analyze multiple libraries at once, so a loop isn't necessary, but it still needs an if-else conditional for paired end data.  Makes that decision based on whether or not there's a value for Read2 in the first row of samples.
+		# I think it's more experimentally sound to analyze paired and single reads separately until the very last moment, and this is coded to support that.  See README.
+
+
+
+# Arguments (C/R version) 
+	# files = ${bam[@]:1}
+	# -T/nthreads = 8
+	# -a/annotation = /data/srlab/cmhong/ref-hg19/gencode-v19-chr.gtf
+	# isGTFAnnotationFile = TRUE (set by default in C subread but not R subread),
+	# useMetaFeatures = TRUE (default, generally means analysis at gene rather than exon level.  Genes are simpler to analyze statistically)
+	# GTF.attrType = gene_id (default, what featureCounts uses to assign to meta-feature)
+	# allowMultiOverlap = FALSE (default.  If summarizing at meta-feature level, read will still count if it overlaps features within the same meta-feature.  False is recommended for RNA-seq because the read must have come from one gene, but TRUE recommended for ChIP-seq because epigenetic modifications inferred for those reads may regulate the functions of all the overlapped genes.)
+	# countMultiMappingReads = FALSE (default - should also be 0 since in subjunc we specified unique reads)
+	# -Q/minMQS = 20 (minimum read mapping quality score to be counted.  For paired ends, at least one read must meet criteria),
+	# -o = [output file name] (Only valid for C version of subread.  For R, use write.table to store output in external file.)
+	# -p/isPairedEnd is FALSE by default, add -p flag if TRUE.  Also, if true, there are other options that may need to be accounted for - will find out when I start working with paired end data.
+
+
+# TIME ESTIMATE
+
+# For 27 x 1-2 GB files:
+# Resource usage summary:
+
+#    CPU time   :   3019.81 sec.
+#    Max Memory :       461 MB
+#    Max Swap   :      1232 MB
+
+#    Max Processes  :         4
+#    Max Threads    :        13
+
+# 3019.81 seconds = 50.33 minutes
+	# Every individual BAM file took < 1 minute to align, so I'm guessing the whole job took 50.33 minutes / 4 processes = 12.59 min.
+
+
+# About 75-80% of the reads were mapped.
+
+
+#####
+
+# CLEANING UP FEATURECOUNTS OUTPUT AND ATTACHING GENE NAME TO ID
+
+# Using the table of Ensembl gene IDs and gene names from the GTF file that was built in the BUILDING REFERENCE GENOME HG19 section.  Again, adapted from http://genomespot.blogspot.com/2015/01/generate-rna-seq-count-matrix-with.html (Mark Ziemann)
+
+
+# From Subread documentation:
+
+	# "Output of featureCounts program in SourceForge Subread package is saved into a tab-delimited file, which includes annotation columns (`Geneid', `Chr', `Start', `End', `Strand' and `Length') and data columns (read counts for each gene in each library).  Annotation column `Length' contains  total  number  of  non-overlapping  bases  of  each  feature  or  meta-feature.   When  for example  summarizing  RNA-seq  reads  to  genes,  this  column  will  give  total  number  of  non-overlapping bases included in all exons belonging to the same gene, for each gene.
+
+	# When  performing  summarization  at  meta-feature  level,  annotation  columns  including `Chr',  `Start',  `End',  `Strand'  and  `Length'  give  the  annotation  information  for  every  feature included each meta-features.  Therefore, each of these columns may include more than one value (semi-colon separated)."
+
+# Although they sound good, the Chr, Start, End, and Strand columns are generally a mess and unused for downstream analysis.
+
+# To remove the extra columns, use cut to extract the first column (geneID) and 6th to final columns (Length = "total number of non-overlapping bases of each feature or meta-feature", then counts from each sample) from featureCounts output.  Pipe output to sed.
+# Delete first line of featureCounts output (the command used to run it) with sed and store in fcCounts file.
+cut -f1,6- < ${fileFcOutput} | sed 1d > ${fileFcCounts}
+
+# NOTE: This transfer preserves the Length column for RPKM analysis.  Some analysis packages prefer a matrix of only counts.  To exclude saving the Length column, cut -f1,7-.
+
+
+# Store first line (column names) in a TXT.
+head -n 1 ${fileFcCounts} > aa_fcCounts-header.txt
+
+
+# Delete first line (column names) in fcCounts file with sed and pipe the rest of the file to sort.
+# Sort by the first column (ignoring whitespace), first character (same as the method used on the original annotation file).
+# Join field 1 (gene_id) of file 1 with field 1 (gene_id) of file 2), with the Ensembl gene name file as file 1 and the results of sort (represented as "-" for standard input) as file 2.
+	# From http://ss64.com/bash/join.html, "Fields in the output are separated by a space; Each output line consists of the join field, the remaining fields from FILE1, then the remaining fields from FILE2."
+# Translate spaces in the output of join into tabs.
+# Replace tabs WITHIN a field with underscores using sed.
+# Add the output from sed to the column names stored in the TXT file with cat.
+# Store final output.
+
+sed 1d ${fileFcCounts} | sort -k 1b,1 | join -1 1 -2 1 ${pathRef}/hg19EnsGeneID_GeneName.txt - | tr ' ' '\t' | sed 's/\t/_/' | cat aa_fcCounts-header.txt - > ${fileFcCountsNames}
+
+
+#####
+
+# Tip for debugging
+
+# Can use the set command within script to turn tracing on and off. Use set -x to turn tracing on and set +x to turn tracing off.
+
+
+#####
+
+endStatus="featureCount summarization from SRA files is ready for analysis in ${fileFcCountsNames}."
+
+echo ${endStatus}
+
+# END OF FILE

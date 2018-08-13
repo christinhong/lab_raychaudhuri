@@ -1,0 +1,306 @@
+#!/bin/bash
+
+#BSUB -cwd "/data/srlab/cmhong/data/test"
+
+#BSUB -u christin.cmh@gmail.com
+#BSUB -J RNA-DE-01
+#BSUB -o aa_RNA-DE-01_output.txt
+#BSUB -e aa_RNA-DE-01_errors.txt
+
+#BSUB -q big-multi
+#BSUB -n 8
+#BSUB -M 40000
+#BSUB -R 'rusage[mem=40000]' 
+
+#####
+
+# Christin M. Hong
+# Last modified: 2015-08
+# Soumya Raychaudhuri Lab, Harvard Medical School
+
+# Bash script for processing human RNA-seq data as a job on the ERISOne Partners cluster.
+	# Input: SRA files in working directory and Targets file (see # TARGETS FILE)
+	# Output: featureCounts outputs
+	# Processes run: fastq-dump, FastQC, subjunc, and featureCounts.
+		# UCSC reference genome v19 and Gencode annotation, meta-feature level.
+	#  See verbose version for notes and sample code for downloading with ncftp, uploading with rsync, and logging into the cluster.
+
+	
+#####
+
+# GLOBAL VARIABLES
+	# Bash variables are untyped by default.  For more robust code, can declare data type with [declare].  See http://tldp.org/LDP/abs/html/declareref.html
+
+intCPUs=8
+fileFcOutput=aa_RNA-01_fcOutput_$(date +%Y%m%d).txt
+fileFcCounts=aa_RNA-01_fcCounts.txt
+pathApps=/data/srlab/cmhong/apps
+pathRef=/data/srlab/cmhong/ref-hg19 # Contains 1) reference genome, 2) GTF annotation file, and 3) table of Ensembl gene IDs and names from GTF annotation file
+
+# Apps with the versions in their respective PATHs set to global variables
+subread=subread-1.4.6-p4-Linux-x86_64
+fastQC=fastQC-0.11.3
+sraToolKit=sratoolkit.2.5.2-ubuntu64
+
+# Other apps used in this script:
+# twoBitToFa
+
+
+# Variables set to pipe-wide values.  WARNING: These values are called in downstream scripts - changing will break pipe!
+fileTargets=aa_RNA-01_Targets.txt
+fileFcCountsNames=aa_RNA-01_fcCountsNames.txt 
+
+
+#####
+
+# TARGETS FILE (stored in global variable "fileTargets")
+	# Made by hand this time, but if I do this again, will use/write code for auto-population (and auto-downloading of SRA files onto cluster)...
+	# Targets file can also be used downstream for voom {limma} in RStudio.  
+
+
+# Needs to be TAB-DELIMITED with no whitespaces or special characters in path/file names (or else the Subread functions will break).  If necessary, rename files with another script to remove special characters before running this script.
+
+# Example extract of Targets file with single-read data (empty Read2 column):
+	# Group	Read1	Read2	Aligned
+	# H0	SRR1786581.sra.fastq		HC1-0.bam 
+
+	# Column 1: Group assignments (if necessary, can subset or re-group later in RStudio).
+
+	# Columns 2 and 3: Names of FASTQ (or other subjunc input compatible) format.  Forward reads in Read1, reverse in Read2.  If using an alternative orientation for paired reads, will need to manually edit the subjunc command, because it's set to -S fr.
+	# IMPORTANT: featureCounts here decides whether to summarize for paired or single reads based on the FIRST value for column Read2.  Be sure to check output to confirm that the correct featureCount command was run!  (And don't mix single and paired read data.  If absolutely necessary, do that at the very end of all standard analyses.)
+
+	# Column 4: Desired aligned BAM file names.  BAM files will be generated with these names later by subjunc.
+
+
+#####
+
+# BUILDING REFERENCE GENOME HG19
+	# Only needs to be done once per user, then can be read by all future scripts.
+
+# If needed for index (reference genome), download hg19 (human genome v19) with ncftp from the UCSC Genome Browser to directory ref-hg19 (or whatever you want to call your reference directory).  See directions here: http://hgdownload.cse.ucsc.edu/goldenpath/hg19/chromosomes/
+	# Using hg19 because as of August 2015, it's better annotated and has a lot of historical data, whereas the newer hg38 is still being vetted.
+
+
+# Download matching annotation file (v19) from Gencode to reference genome directory: http://www.gencodegenes.org/releases/current.html
+	# Using the wrong version will result in a very low % (e.g. 15%) of reads mapping with featureCounts.  I've also only used the Comprehensive gene annotation for chromosomal regions only, GTF format.
+
+
+#  To decompress the .2bit file into a fasta file, download twoBitToFa from http://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/twoBitToFa and upload to personal apps directory in cluster.
+
+
+# Convert twoBitToFa to an executable
+	# chmod a+x twoBitToFa # @CODE 
+# Run twoBitToFa
+	# ${pathApps}/twoBitToFa "hg19.2bit" "hg19.fa" # @CODE 
+
+
+# Build index with:
+	# ${pathApps}/${subread}/bin/subread-buildindex -M 36000 -o hg19-index hg19.fa # @CODE 
+	# TIME ESTIMATE: ~17 minutes with 16 GB RAM.
+
+
+#####
+
+# MAKE TABLE OF ENSEMBL GENE IDS AND NAMES FROM GTF ANNOTATION FILE
+	# Only needs to be done once per user, then can be read by all future scripts.
+
+	# Makes it easier to get an idea of what's going on immediately after processing data...though all the genes will probably need to be looked up anyway.  ;)  Adapted from http://genomespot.blogspot.com/2015/01/generate-rna-seq-count-matrix-with.html (Mark Ziemann)
+
+
+# Check column order of annotation file.
+	# head ${pathRef}/gencode-v19-chr.gtf > gencode-v19-chr-head.txt # @CODE 
+
+
+# Open in LibreOffice Calc as a double quotes (") delimited file.  Find column numbers for gene_id and gene_name.  For the Gencode annotation for hg19, it's 2 and 10, respectively. 
+
+
+# Select only lines with the full word "gene" in the file with grep and pipe to cut.
+# Using " as a delimiter, extract columns 2 and 10 with cut.
+# Pipe output of cut to tr to replace " with tabs.
+# Sort lines on field 1 (gene_id) while ignoring leading and trailing whitespace (b option), character 1.
+# Record results in TXT.
+
+# grep -w gene ${pathRef}/gencode-v19-chr.gtf | cut -d '"' -f2,10 | tr '"' '\t' | sort -k 1b,1 > ${pathRef}/hg19EnsGeneID_GeneName.txt # @CODE
+
+
+#####
+
+# SCRIPT START
+echo "Usage: $0"
+
+#####
+
+# DECOMPRESSING SAMPLE SRA FILES TO FASTQ
+
+for i in *.sra ; 
+	do ${pathApps}/${sraToolKit}/bin/fastq-dump --split-files ${i} ; 
+done
+
+
+# If needed, uncomment to erase SRA files (UNTESTED).
+# rm -f *.sra # @CODE
+
+#####
+
+# FASTQ TO CHECK QUALITY OF READ LIBRARIES
+	# The first time I used fastQC, needed to run:
+	# chmod a+x ${pathApps}/${fastQC}/fastqc # @CODE 
+	# before running fastqc to flag fastqc as an executable.
+
+${pathApps}/${fastQC}/fastqc *.fastq --threads ${intCPUs}
+
+#####
+
+# ALIGNING READS WITH SUBJUNC {SUBREAD}
+	# This is the longest step in the process.  Run overnight if possible.  	
+	# Running Subread in bash because RStudio currently has limited cluster support.
+	
+
+# CONVERT TARGETS FILE TO BASH PSEUDOARRAY
+	# Adapted from http://stackoverflow.com/questions/17137269/bash-take-nth-column-in-a-text-file (jm666 and ganessh) and http://superuser.com/questions/759309/bash-use-columns-separate-in-an-array (Hastur)
+
+# Test whether version of bash supports arrays.
+testArray[0]='test' || (echo 'Error: Arrays not supported in this version of
+bash.  Time to update?' && exit 2)
+
+# Transfer Read1 (column 2 = field 2), Read2, and Aligned columns to TXT files.
+cut -f2 < ${fileTargets}  >  aa_fq1.txt
+cut -f3 < ${fileTargets}  >  aa_fq2.txt
+cut -f4 < ${fileTargets}  >  aa_bam.txt
+
+# Use readarray to read the TXT file and store values in a 1D vector 
+# (as of August 2015, bash only supports 1D vectors).
+readarray -t fq1 < aa_fq1.txt
+readarray -t fq2 < aa_fq2.txt
+readarray -t bam < aa_bam.txt
+
+# If needed, uncomment to erase the temporary files created in the script.
+# rm aa_fq1.txt aa_fq2.txt aa_bam.txt # @CODE
+
+
+# RUN SUBJUNC LOOP ON TARGETS PSEUDO-ARRAY
+
+i=1 ;
+for item in "${fq1[@]}" ; do
+	if [[ -n "${fq2[i]}" ]] ; then
+		echo "Detected value for Read2.  Aligning for PAIRED reads."
+		${pathApps}/${subread}/bin/subjunc \
+		-i ${pathRef}/hg19-index \
+		-r ${fq1[${i}]} \
+		-R ${fq2[${i}]} \
+		-o ${bam[${i}]} \
+		-u \
+		-H \
+		--BAMoutput \
+		-d 0 \
+		-D 1000000 \
+		--allJunctions \
+		-T ${intCPUs} \
+		-S fr
+	else
+		echo "Did not detect value for Read2.  Aligning for SINGLE reads."
+		${pathApps}/${subread}/bin/subjunc \
+		-i ${pathRef}/hg19-index \
+		-r ${fq1[${i}]} \
+		-o ${bam[${i}]} \
+		-u \
+		-H \
+		--BAMoutput \
+		-d 0 \
+		-D 1000000 \
+		--allJunctions \
+		-T ${intCPUs}
+	fi
+	let "i=i+1"
+done
+
+echo "This script currently runs an extra loop that tries to align SINGLE reads at the end.  This is because it reads the 'done' at the end of the loop as a value for Read1."
+echo "" # Insert newline between output messages.
+
+
+# Notes
+	# Subjunc on the cluster doesn't like single or double quotes in the command - using -R "${fq2[$i]}" causes the process to abort after "The input file contains base space reads" (never gets to "Load the 1-th index block...").
+	# ~85-90% of reads mapped.
+
+#####
+
+# SORT AND SUMMARIZE READS WITH FEATURECOUNTS {SUBREAD}
+
+# Summarize aligned files.
+
+if [[ -n "${fq2[1]}" ]] ; then 
+	echo "Detected value for Read2, Sample 1.  Summarizing for PAIRED reads."
+	${pathApps}/${subread}/bin/featureCounts \
+	${bam[@]:1} \
+	-T ${intCPUs} \
+	-a ${pathRef}/gencode-v19-chr.gtf \
+	-Q 20 \
+	-o ${fileFcOutput} \
+	-p
+else
+	echo "Did not detect value for Read2, Sample 1.  Summarizing for SINGLE reads."
+	${pathApps}/${subread}/bin/featureCounts \
+	${bam[@]:1} \
+	-T ${intCPUs} \
+	-a ${pathRef}/gencode-v19-chr.gtf \
+	-Q 20 \
+	-o ${fileFcOutput}
+fi
+echo "" # Insert newline between output messages.
+
+
+# Notes
+	# Using same Targets pseudo-array generated earlier in this script for subjunc.
+	# featureCounts can analyze multiple libraries at once, so a loop isn't necessary, but it still needs an if-else conditional for paired end data.  Makes that decision based on whether or not there's a value for Read2 for the first sample.
+		# I think it's more experimentally sound to analyze paired and single reads separately until the very last moment, and this is coded to support that.
+	# ~75-80% of reads mapped.
+
+#####
+
+# CLEANING UP FEATURECOUNTS OUTPUT AND ATTACHING GENE NAME TO ID
+	# Using the table of Ensembl gene IDs and gene names from the GTF file that was built in the BUILDING REFERENCE GENOME HG19 section.  Again, adapted from http://genomespot.blogspot.com/2015/01/generate-rna-seq-count-matrix-with.html (Mark Ziemann)
+
+
+# Use cut to extract from featureCounts output the columns with GeneID, Length, and sample counts.  Pipe output to sed, delete first line of featureCounts output (the command used to run it), and store in file.
+cut -f1,6- < ${fileFcOutput} | sed 1d > ${fileFcCounts}
+
+# Store first line (column names) in a TXT.
+head -n 1 ${fileFcCounts} > aa_fcCounts-header.txt
+
+
+# Delete first line (column names) in fcCounts file with sed. 
+# Pipe rest of the file for sorting by GeneID (first column, first character).
+# Join output of sort (represented as "-" for standard input) by gene id to table of Ensembl gene IDs and names. file 1 with column 1 (gene_id) of file 2
+# Translate spaces in the output of join into tabs.
+# sed to replace tabs WITHIN a field with underscores.
+# cat to add the output from sed to the column names stored in the TXT file.
+# Save final output in external TXT file.
+
+sed 1d ${fileFcCounts} | sort -k 1b,1 | \
+join -1 1 -2 1 ${pathRef}/hg19EnsGeneID_GeneName.txt - | tr ' ' '\t' | \
+sed 's/\t/_/' | cat aa_fcCounts-header.txt - > ${fileFcCountsNames}
+
+
+#####
+
+# Tip for debugging
+
+# Can use the set command within script to turn tracing on and off. Use set -x to turn tracing on and set +x to turn tracing off.
+
+
+#####
+
+endStatus="featureCount summarization from SRA files is ready for analysis in \
+${fileFcCountsNames}."
+
+echo ${endStatus}
+
+# END OF SCRIPT
+
+
+# PLANS FOR NEXT VERSION
+	# 1. Script for downloading all desired SRAs and transferring to working directory (may need to run directly on cluster in an interactive session depending on cluster permissions).
+	# 2. Auto-creation of Targets file.
+	# 3. Incorporation of GNU parallel.
+	# 4. Set options for subjunc and featureCounts under global variables.
+	# 5. Change sed to tail if simply removing the first line of the fcOutput file - there's a note somewhere on StackOverflow that tail is faster.

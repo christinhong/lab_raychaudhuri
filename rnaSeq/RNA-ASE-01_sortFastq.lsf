@@ -1,0 +1,176 @@
+#!/bin/bash
+
+#BSUB -cwd "/data/srlab/cmhong/data/2015-09_RNA_Hirahara-OShea_stat1-ASE"
+
+#BSUB -u christin.cmh@gmail.com
+#BSUB -J "ASEInitialSort"
+#BSUB -o aaa_RNA-ASE-02_output_%J.txt
+#BSUB -e aaa_RNA-ASE-02_errors_%J.txt
+
+#BSUB -q medium
+#BSUB -n 2
+#BSUB -M 2000
+#BSUB -R 'rusage[mem=2000]'
+
+# @ BSUB -w "done(370930)" # Delete @ to run.  Can use BSUB -w "done(job ID)" to set this script to run after the first completes.
+
+# 2015-09 Note: Every computer/node on the ERISOne Raychaudhuri Lab cluster has 24 CPU/job slots and 100 GB RAM.  Limit per job is 40 GB.
+
+
+#####
+
+# Christin M. Hong
+# Last modified: 2015-11
+# Lab of Soumya Raychaudhuri, MD, PhD (Harvard Medical School)
+
+# Bash script for allele-specific expression (ASE) analysis on human RNA-seq data.  Running on the ERISOne Partners cluster (LSF).
+     # Adapted from Dr. Maria Gutierrez-Arcelus's scripts for allele-specific expression
+
+
+#####
+
+# INPUT AND RESOURCES
+
+# 1) FASTQ files
+          # Assumes FASTQ files are sorted by individual and every individual supplied the same number of samples (e.g. Samples #1-3 are all from Person 1, #4-6 from Person 2, etc.)  If this isn't the case, will need to organize samples beforehand for the GATK HaplotypeCaller.
+
+
+# 2) Reference files (search script for context)
+     # UCSC reference genome hg19 
+     # Gencode annotations for hg19
+     # GATK Resource Bundle for hg19 (https://www.broadinstitute.org/gatk/guide/article.php?id=1215)
+          # ucsc.hg19.fasta
+          # ucsc.hg19.fasta.fai
+          # ucsc.hg19.dict
+          # dbsnp_138.hg19.vcf
+          # dbsnp_138.hg19.vcf.idx
+          # 1000G_phase1.snps.high_confidence.hg19.vcf
+          # 1000G_phase1.snps.high_confidence.hg19.vcf.idx
+     # RepeatMasker_UCSCtab_hg19_Nov2014.sorted.bed
+     # RepeatMasker_UCSCtab_hg19_Nov2014.sorted.bed.idx
+     # UCSCgenes_knowGene_hg19_Nov2014.SNPiRformat.txt
+     # darned_UCSCtab_Nov2014.bed
+     # wgEncodeCrgMapabilityAlign75mer_lowMap.bed
+     # EUR01_50bp_result_stats_05bias.bed
+     # hg19ChrList2.txt
+
+
+# 3) Apps and scripts listed in GLOBAL VARIABLES section
+
+
+#####
+
+# GLOBAL VARIABLES
+
+# Experiment-specific
+export pathWd=/data/srlab/cmhong/data/2015-09_RNA_Hirahara-OShea_stat1-ASE # Working directory (set in #BSUB option, line 3)
+export fileInd=ASE01_aa_stat1-ind # Retain "ind." at end for compatibility with RNA-ASE-03 (output cleanup) script
+export pathInd=all${fileInd}.${LSB_JOBINDEX}
+export intFastqPerIndividual=3
+
+
+# Job-specific
+export intCPUs=2
+export intRAMmax=2
+
+
+# Paths and reference files
+export pathRef=/data/srlab/cmhong/ref-hg19
+export pathSubscripts=/data/srlab/cmhong/scripts/subscripts
+export pathApps=/data/srlab/cmhong/apps
+export fileRef=${pathRef}/ucsc.hg19.fasta
+export fileChrList=${pathRef}/hg19ChrList2.txt
+export fileDbsnp=${pathRef}/dbsnp_138.hg19.vcf
+export file1000G=${pathRef}/1000G_phase1.snps.high_confidence.hg19.vcf
+export pathStarRef=${pathRef}/STAR-hg19
+export pathSubscriptsMaria=${pathSubscripts}/RNA-ASE_maria
+
+
+# Apps and scripts with versions in their respective paths
+export parallel=${pathApps}/parallel-20150822/src/parallel
+export STAR=${pathApps}/STAR-STAR_2.4.2a/bin/Linux_x86_64_static/STAR
+export picard=${pathApps}/picard-f24c400-broadinstitute/dist/picard.jar
+export GATK=${pathApps}/gatk-3.4-46/GenomeAnalysisTK.jar
+export SNPiR=${pathApps}/SNPiR # !!! MANUAL MODIFICATION REQUIRED !!!  See ASE02f08 section notes.
+export subread=${pathApps}/subread-1.4.6-p4-Linux-x86_64/bin
+export scriptASE=${pathSubscriptsMaria}/samase_modMGA.pl # See http://montgomerylab.stanford.edu/resources/kukurba2013/index.html
+export bcftools=/data/srlab/slowikow/src/bcftools-1.2/bcftools # Borrowing from Kam due to cluster dependency issues and being shorter on time than I'd like.
+
+
+# Other apps used in this script.
+     # Need to adjust htslib installation to set into custom PATH for dependencies (zlib and glibc) to be properly called.
+module load samtools/1.1
+module load vcftools/0.1.12
+module load BEDTools_2.17 # Note that Piskol scripts expect this to be in PATH, so if it's not, will need to manually edit at least the script for homopolymer nt filtering; maybe others.
+
+
+# Other options
+LC_COLLATE=C
+
+
+# Notes
+	# Export: Variables are inherited by child processes (e.g. subshells from GNU parallel).
+     # Bash variables are untyped by default.  For more robust code, can declare data type with [declare] (see http://tldp.org/LDP/abs/html/declareref.html ), but I'm not sure how declare works with export.  May try later.\
+     # When possible, using full path in order to record app version (will copy scripts into the directory with the data at the end) and increase clarity regarding dependencies.
+     #export queueGATK=$pathApps/queue-3.4-46/Queue.jar # Queue isn't compatible with LSF v9+ (see http://gatkforums.broadinstitute.org/discussion/3162/queue-and-lsf-versions).  As of 2015-09-12, running "lsid" on ERISOne reported "Platform LSF 8.0.1, Jun 13 2011", so it'd work for now, but it seems like a lot of effort to learn this platform if it's already outdated.
+
+
+#####
+
+echo "Today's date is $(date +%Y-%m-%d)"
+
+# Add newline to output for readability
+echo
+
+
+#####
+
+# PREP FOR LSF JOB ARRAY:
+     # CREATING SUBDIRECTORIES PER INDIVIDUAL AND TRANSFERING IN THEIR FASTQ FILES
+
+# Generate sorted list of FASTQ files in current directory (having issues with using sort after find; decided to just go with ls instead).
+ls -1 *.fastq > ASE01_aa_fastqV1.txt
+
+
+# Add placeholder lines for index 0
+i=1
+while [ "${i}" -le "${intFastqPerIndividual}" ]; do
+     echo "${i}"
+     let "i=i+1"
+done > ASE01_aa_fastqV2.txt
+
+cat ASE01_aa_fastqV1.txt >> ASE01_aa_fastqV2.txt
+
+
+# Notes
+     # Bash on ERISOne is currently too old to support the option to set a starting value for the numeric suffix option for split, but even if it weren't, I think it's better to simply create a placeholder for index 0 anyway, because split won't automatically adapt the number of significant digits (e.g. setting a starting value of 1 will limit split to only making files 1-9, 01 to 00-99, etc.).
+
+
+#####
+
+# Split list of FASTQ files by number of samples per individual such that the resulting files contain the list of FASTQ files for that individual.
+split --lines=${intFastqPerIndividual} \
+     --numeric-suffixes \
+     ASE01_aa_fastqV2.txt \
+     ${fileInd}.
+
+
+# Remove leading zeros in numeric suffix (by converting to base 10) in order to be compatible with LSF job array
+for f in ${fileInd}.* ; do 
+     mv -i "$f" "${f%\.*}.$(( 10#${f##*\.} ))"
+done
+
+
+# Create TXT file with the names of the individualized files
+find . -name "${fileInd}.*" -type f -printf '%f\n' > ASE01_aa_indList.txt
+
+
+# Make a subdirectory for each individual based on the split TXT files, and transfer in the FASTQ files listed within each individual's file.
+${parallel} -j ${intCPUs}  --joblog --resume-failed \
+     'sh ${pathSubscripts}/RNA-ASE-01_func01SortByIndividual.sh' \
+     :::: ASE01_aa_indList.txt
+
+
+# Section notes
+     # A more robust way requires a standardized file structure at the very beginning, e.g. if in the sequencing output there's a column with individual IDs to match sample IDs, I could physically tag the samples with the individual IDs at the beginning and sort them that way here.  But for now, I'll work with what I have.
+

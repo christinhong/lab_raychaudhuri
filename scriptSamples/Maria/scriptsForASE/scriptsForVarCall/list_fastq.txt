@@ -1,0 +1,12 @@
+/medpop/srlab/mgutierr/tofiPub/SRR1552955.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552956.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552957.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552958.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552959.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552960.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552961.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552962.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552963.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552964.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552965.fastq
+/medpop/srlab/mgutierr/tofiPub/SRR1552966.fastq

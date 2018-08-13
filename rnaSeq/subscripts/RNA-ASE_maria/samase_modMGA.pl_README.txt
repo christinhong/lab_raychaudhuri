@@ -1,0 +1,219 @@
+.. ASE documentation master file, created by
+   sphinx-quickstart on Wed Oct 23 15:19:09 2013.
+   You can adapt this file completely to your liking, but it should at least
+   contain the root `toctree` directive.
+.. toctree::
+   :maxdepth: 2
+
+
+
+Supplementary Methods for Kukurba, et al. 
+===============================
+This site provides the code and files necessary to replicate allele-specific expression (ASE) detection from mmPCR-Seq data published in the Kukurba, et al. paper. The steps outlined below shows how to call variants from expression data and test for ASE to identify loci with allelic imbalance at the expression level. The final output (ase.txt file) is equivalent to the processed files available on the Gene Expression Omnibus (GSE51769). These steps can be applied to to other expression data sets.
+
+
+Dependencies
+============
+* `STAR version 2.14 or newer <https://code.google.com/p/rna-star/>`__ must be installed and be in your $PATH
+* `Tabix <http://sourceforge.net/projects/samtools/files/tabix/>`__ must be installed and be in your $PATH
+* `SAMtools <http://samtools.sourceforge.net/>`__ must be installed and be in your $PATH
+* `Perl version 4.0 or newer <http://www.perl.org>`__
+* `R version 2.10 or newer <http://www.r-project.org>`__
+* `Gencode GTF annotation file <http://www.gencodegenes.org/releases/>`__
+
+
+
+Installation
+============
+
+1. Install the above dependencies.
+
+2. Download the :download:`samase.pl <samase.pl>` script to the desired directory
+
+3. Modify the `samase.pl` script to point to specific PATHs:
+    a. Modify the line below to point to where R is installed.
+    ::
+            my $RLOC = "/usr/software/R/R-2.12.0/bin/R";
+
+
+    b. Modify the line below to point to the directory where this file is located.
+    ::
+            my $gencode_data_file = "/usr/resources/gencode.v7.annotation.gtf"; 
+
+
+
+
+
+**Part 1: Aligning Expression Data**
+===========================
+
+Input files
+-----------
+Prior to detecting allele-specific expression, the raw data needs be aligned to the reference genome and requires the following files as input:
+
+1. .fq file containing the raw mmPCR-seq data. This file can be downloaded from the Gene Expression Omnibus (GSE51769). 
+
+2. .fa file containing the human reference genome.
+
+
+
+**1. Align fastq files using STAR**
+-------------------------------------
+
+ **Description:** This command will align the fastq files downloaded from GEO to the human reference genome. 
+
+ **Input:** .fq file
+
+ **Output:** .sam file
+
+ **Command:**
+ ::
+        STAR ---genomeDir [GENOME_DIR] --readFilesIn [FASTQ_FILE]  --runThreadN [N] --genomeLoad LoadAndKeep  --outFileNamePrefix [OUTPUT_PREFIX]. --outFilterScoreMin [N] --outFilterScoreMinOverLread [N] --outFilterMatchNmin [N] -- outFilterMatchNminOverLread [N]
+
+
+ **Example:**
+ ::
+	STAR --genomeDir genomes/hg19_STAR_junctions --readFilesIn Cerebr-rep1_S2_L001_R1_001.fastq  --runThreadN 4 --genomeLoad LoadAndKeep  --outFileNamePrefix index1.R1. --outFilterScoreMin 0 --outFilterScoreMinOverLread 0 --outFilterMatchNmin 0 -- outFilterMatchNminOverLread 0
+
+
+**2. Convert format of expression file**
+-------------------------------------
+
+ **Description:** This command will convert the aligned .sam file to a .bam file, which is necessary for ASE detection later. 
+
+ **Input:** .sam file
+
+ **Output:** .bam file
+
+ **Command:**
+ ::
+        samtools view -S -b -o [OUTPUT_FILE] [INPUT_FILE] 
+
+ **Example:**
+ ::
+	samtools view -S -b -o index1.R1.bam index1.R1.sam 
+
+
+
+
+
+**Part 2: Detecting Allele-Specific Expression**
+===========================
+
+Input files
+-----------
+To detect allele-specific expression, the following files are required as input:
+
+1. .bed or .vcf file containing list of heterozygous sites to call ASE.
+
+2. .bam file containing the aligned RNA-seq data. 
+
+3. .fa file containing the human reference genome.
+
+
+
+**1. Sort alignments using SAMtools**
+-------------------------------------
+
+ **Description:** This command will sort the aligned .bam files by the leftmost coordinate positions. 
+
+ **Input:** Aligned .bam file
+
+ **Output:** Sorted .bam file
+
+ **Command:**
+ ::
+        samtools sort [INPUT_FILE] [OUTPUT_FILE]
+
+ **Example:**
+ ::
+        samtools sort index1.bam  index1.sorted
+
+
+
+**2. Call variants using SAMtools**
+-----------------------------------
+
+ **Description:** This command will call variants in the RNA-Seq data by transposing the aligned data for the heterozygous positions specified for the individual.
+
+ **Input:** Sorted .bam file, .vcf file, reference FASTA file
+
+ **Output:** Pileup file
+
+ **Command:**
+ ::
+        samtools mpileup -s -B -f [REF_FILE] [INPUT_FILE] -l [VCF_FILE] > [OUTPUT_FILE]
+
+ **Example:**
+ ::
+        samtools mpileup -B -f hg19.fa index1.sorted.bam -l individual.hets.vcf > index1.pileup.txt
+
+ **Options:**
+  -B     Disable probabilistic realignment for the computation of base alignment quality
+  -l   Position list file containing a list of sites where pileup should be generated
+
+
+**3. Parse pileup file**
+------------------------
+
+ **Description:** This command will parse the mpileup file into an easily readable format.
+
+ **Input:** Pileup file, .vcf file
+
+ **Output:** Parsed pileup file, .vcf file
+
+ **Command:**
+ ::
+        perl samase.pl  -parse_pileup --sp [INPUT_FILE] –vcf [VCF_FILE] > [OUTPUT_FILE]
+
+ **Example:**
+ ::
+        perl samase.pl  -parse_pileup --sp index1.pileup.txt –vcf individual.hets.vcf > index1.parsed_pileup.txt
+
+
+**4. Create gene-snp mapping file**
+-----------------------------------
+
+ **Description:** This command will map each variant to an annotated gene. This is useful so you know which genes the SNPs are testing for ASE later. The location of the annotation file (e.g. gencode.v16.gtf) needs to be indicated the samase.pl script.
+
+ **Input:** .vcf file
+
+ **Output:** Gene/snp mapping file
+
+ **Command:**
+ ::
+        perl samase.pl  --get_gene_snp_mapping_file --use_gencode -is [VCF_FILE] > [OUTPUT_FILE]
+
+ **Example:**
+ ::
+        perl samase.pl  --get_gene_snp_mapping_file --use_gencode -is individual.hets.vcf > gene_snp_mapping_file.txt
+
+
+**5. Binomial test for ASE**
+----------------------------
+ **Description:** This command will conduct a binomial test using the SNP positions specified in the .vcf file.
+
+ **Input:** .vcf file, parsed pileup file, gene/snp mapping file
+
+ **Output:** ASE binomial test file. The output files will be equivalent to the processed files that can be downloaded from the Gene Expression Omnibus (GSE51769).
+
+ **Command:**
+ ::
+        perl samase.pl --calculate_ase_normal --pp [PARSED_PILEUP_FILE] –is [VCF_FILE] -r 0.5 –gf [GENE_SNP_MAPPING_FILE] > [OUTPUT_FILE]
+
+ **Example:**
+ ::
+        perl samase.pl --calculate_ase_normal --pp index1.parsed_pileup.txt –is individual.hets.vcf  -r 0.56 –gf gene_snp_mapping_file.txt -mrs 20 -bq 10 > index1.ase.txt
+
+ **Options:**
+  -r     Expected reference to non-reference allele mapping ratio
+  -mrs   Minimum number of reads before a test for ASE will be performed
+  -bq    Minimum base quality tolerated
+ 
+ 
+Additional Resources
+==========
+`STAR manual <https://code.google.com/p/rna-star/>`__
+
+`SAMtools manual <http://samtools.sourceforge.net/>`__
+

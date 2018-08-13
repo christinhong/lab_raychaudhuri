@@ -1,0 +1,61 @@
+####################
+###### MAKE PERSONALIZED MASKED GENOME
+
+workingDir=/home/unix/mgutierr/work/rnaseq/cd4timelinepilot/tofiPub
+
+sh try_pipeline_maskGenome.sh
+
+####still need to map to masked genome
+
+
+################
+
+
+screen
+parallel -j3 --eta 'sh run_subread-allign_tofiPub_u_Q_FL100K_maskedGenome.sh' :::: list_fastq_donor1.txt
+
+tmux
+reuse
+parallel -j3 --eta 'sh run_pileup_ase.sh' :::: list_bams_subreadM.txt
+
+cd /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/tofiPub/ASE
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/access/scripts/get_summaryStats_ASE.pl /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.vcf /medpop/srlab/mgutierr/tofiPub/ASE/*.ase.txt
+
+
+ls -1 /medpop/srlab/mgutierr/tofiPub/mapping/SRR15529*/subread_masked/*.sorted.bam > list_sorted_bams.txt
+
+parallel -j3 --eta 'samtools index' :::: list_sorted_bams.txt
+
+##running
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/scripts/get_weightedDupCounts_by100.pl /medpop/srlab/mgutierr/tofiPub/ASE/SRR1552955.ase.txt /medpop/srlab/mgutierr/tofiPub/mapping/SRR1552955/subread_masked/SRR1552955.sorted.bam > out.dupWeighted_by100.SRR1552955.txt
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/scripts/get_weightedDupCounts_by100.pl /medpop/srlab/mgutierr/tofiPub/ASE/SRR1552956.ase.txt /medpop/srlab/mgutierr/tofiPub/mapping/SRR1552956/subread_masked/SRR1552956.sorted.bam > out.dupWeighted_by100.SRR1552956.txt
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/scripts/get_weightedDupCounts_by100.pl /medpop/srlab/mgutierr/tofiPub/ASE/SRR1552957.ase.txt /medpop/srlab/mgutierr/tofiPub/mapping/SRR1552957/subread_masked/SRR1552957.sorted.bam > out.dupWeighted_by100.SRR1552957.txt
+
+
+
+cd /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/tofiPub/ASE/dupWeights
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/scripts/get_summaries_dupWeighted_ASE.pl /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.vcf /medpop/srlab/mgutierr/tofiPub/ASE/dupWeights/out*.txt
+
+####
+cd 
+nice -n20 perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/ASE/FiltScPkBaCnc_subread/samase_modMGA.pl --get_gene_snp_mapping_file --use_gencode -is /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.vcf > gene_snp_mapping_file_NEW_tofiPub.txt
+
+
+#######################
+
+### VCF2BED AND INTERSECT WITH PROBLEMATIC REGIONS
+
+cd /medpop/srlab/mgutierr/tofiPub/ASE
+perl /home/unix/mgutierr/work/rnaseq/cd4timelinepilot/scripts/vcf2bed.pl /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.vcf > /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.bed
+
+intersectBed -a /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.bed -b /medpop/rnaseq/genome/wgEncodeCrgMapabilityAlign75mer_lowMap.bed -wa > vars_passed_ScPkBaCnc_intersectLowMapp.bed
+intersectBed -a /medpop/srlab/mgutierr/tofiPub/varCall/hets_allFilts.ids.bed -b /medpop/srlab/mgutierr/GFs/EUR01_50bp_result_stats_05bias.bed -wa > vars_passed_ScPkBaCnc_intersectPanousisBiasSites.bed
+
+cut -f4 vars_passed_ScPkBaCnc_intersectLowMapp.bed > snps_temp
+cut -f4 vars_passed_ScPkBaCnc_intersectPanousisBiasSites.bed >> snps_temp
+
+cat snps_temp | sort | uniq > snps_withMappingProblems_tofiPub.txt
+wc -l snps_withMappingProblems.txt 
+#769 snps_withMappingProblems_tofiPub.txt
+
+cp snps_withMappingProblems_tofiPub.txt ~/work/rnaseq/cd4timelinepilot/tofiPub/ASE/	

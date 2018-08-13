@@ -1,0 +1,587 @@
+#!/bin/bash
+
+#BSUB -cwd "/data/srlab/cmhong/data/2015-09_RNA_Hirahara-OShea_stat1-ASE"
+
+#BSUB -u christin.cmh@gmail.com
+#BSUB -J "Stat1Ind[1-9]%24"
+#BSUB -o aaa_RNA-ASE-02_output_%J.txt
+#BSUB -e aaa_RNA-ASE-02_errors_%J.txt
+
+#BSUB -q big-multi
+#BSUB -n 8
+#BSUB -M 32000
+#BSUB -R 'rusage[mem=32000]'
+
+# @ BSUB -w "done(370930)" # Delete @ to run.  BSUB -w "done(job ID)" sets this script to run after the first finishes.
+
+# 2015-09 Note: Every computer/node on the ERISOne Raychaudhuri Lab cluster has 24 CPU/job slots and 100 GB RAM.  Limit per job is 40 GB.
+
+	
+#####
+
+# Christin M. Hong
+# Last modified: 2015-11
+# Lab of Soumya Raychaudhuri, MD, PhD (Harvard Medical School)
+
+# Bash script for allele-specific expression (ASE) analysis on human RNA-seq data.  Running on the ERISOne Partners cluster (LSF).
+     # Adapted from Dr. Maria Gutierrez-Arcelus's scripts for allele-specific expression
+
+
+#####
+
+# INPUT AND RESOURCES
+
+# 1) FASTQ files
+          # Assumes FASTQ files are sorted by individual and every individual supplied the same number of samples (e.g. Samples #1-3 are all from Person 1, #4-6 from Person 2, etc.)  If this isn't the case, will need to organize samples beforehand for the GATK HaplotypeCaller.
+
+
+# 2) Reference files (search script for context)
+     # UCSC reference genome hg19 
+     # Gencode annotations for hg19
+     # GATK Resource Bundle for hg19 (https://www.broadinstitute.org/gatk/guide/article.php?id=1215)
+          # ucsc.hg19.fasta
+          # ucsc.hg19.fasta.fai
+          # ucsc.hg19.dict
+          # dbsnp_138.hg19.vcf
+          # dbsnp_138.hg19.vcf.idx
+          # 1000G_phase1.snps.high_confidence.hg19.vcf
+          # 1000G_phase1.snps.high_confidence.hg19.vcf.idx
+     # RepeatMasker_UCSCtab_hg19_Nov2014.sorted.bed
+     # RepeatMasker_UCSCtab_hg19_Nov2014.sorted.bed.idx
+     # UCSCgenes_knowGene_hg19_Nov2014.SNPiRformat.txt
+     # darned_UCSCtab_Nov2014.bed
+     # wgEncodeCrgMapabilityAlign75mer_lowMap.bed
+     # EUR01_50bp_result_stats_05bias.bed
+     # hg19ChrList2.txt
+
+
+# 3) Apps and scripts listed in GLOBAL VARIABLES section
+
+
+#####
+
+# GLOBAL VARIABLES
+
+# Experiment-specific
+export pathWd=/data/srlab/cmhong/data/2015-09_RNA_Hirahara-OShea_stat1-ASE # Working directory (set in #BSUB option, line 3)
+export fileInd=ASE01_aa_stat1-ind # Retain "ind." at end for compatibility with RNA-ASE-03 (output cleanup) script
+export pathInd=all${fileInd}.${LSB_JOBINDEX}
+export intFastqPerIndividual=3
+
+
+# Job-specific
+export intCPUs=8
+export intRAMmax=32
+
+
+# Paths and reference files
+export pathRef=/data/srlab/cmhong/ref-hg19
+export pathSubscripts=/data/srlab/cmhong/scripts/subscripts
+export pathApps=/data/srlab/cmhong/apps
+export fileRef=${pathRef}/ucsc.hg19.fasta
+export fileChrList=${pathRef}/hg19ChrList2.txt
+export fileDbsnp=${pathRef}/dbsnp_138.hg19.vcf
+export file1000G=${pathRef}/1000G_phase1.snps.high_confidence.hg19.vcf
+export pathStarRef=${pathRef}/STAR-hg19
+export pathSubscriptsMaria=${pathSubscripts}/RNA-ASE_maria
+
+
+# Apps and scripts with versions in their respective paths
+export parallel=${pathApps}/parallel-20150822/src/parallel
+export STAR=${pathApps}/STAR-STAR_2.4.2a/bin/Linux_x86_64_static/STAR
+export picard=${pathApps}/picard-f24c400-broadinstitute/dist/picard.jar
+export GATK=${pathApps}/gatk-3.4-46/GenomeAnalysisTK.jar
+export SNPiR=${pathApps}/SNPiR # !!! MANUAL MODIFICATION REQUIRED !!!  See ASE02f08 section notes.
+export subread=${pathApps}/subread-1.4.6-p4-Linux-x86_64/bin
+export scriptASE=${pathSubscriptsMaria}/samase_modMGA.pl # See http://montgomerylab.stanford.edu/resources/kukurba2013/index.html
+export bcftools=/data/srlab/slowikow/src/bcftools-1.2/bcftools # Borrowing from Kam due to cluster dependency issues and being shorter on time than I'd like.
+
+
+# Other apps used in this script.
+     # Need to adjust htslib installation to set into custom PATH for dependencies (zlib and glibc) to be properly called.
+module load samtools/1.1
+module load vcftools/0.1.12
+module load BEDTools_2.17 # Note that Piskol scripts expect this to be in PATH, so if it's not, will need to manually edit at least the script for homopolymer nt filtering; maybe others.
+
+
+# Other options
+LC_COLLATE=C
+
+
+# Notes
+	# Export: Variables are inherited by child processes (e.g. subshells from GNU parallel).
+     # Bash variables are untyped by default.  For more robust code, can declare data type with [declare] (see http://tldp.org/LDP/abs/html/declareref.html ), but I'm not sure how declare works with export.  May try later.\
+     # When possible, using full path in order to record app version (will copy scripts into the directory with the data at the end) and increase clarity regarding dependencies.
+     #export queueGATK=$pathApps/queue-3.4-46/Queue.jar # Queue isn't compatible with LSF v9+ (see http://gatkforums.broadinstitute.org/discussion/3162/queue-and-lsf-versions).  As of 2015-09-12, running "lsid" on ERISOne reported "Platform LSF 8.0.1, Jun 13 2011", so it'd work for now, but it seems like a lot of effort to learn this platform if it's already outdated.
+
+
+#####
+
+echo "Today's date is $(date +%Y-%m-%d)"
+
+# Add newline to output for readability
+echo
+
+
+#####
+
+cd ${pathInd}
+
+
+#####
+
+# PREP WORK DONE ONCE PER GENOME AND ANNOTATION
+
+# Generate STAR hg19 genome index.
+
+# ${STAR} --runMode genomeGenerate \
+#     --genomeDir ${pathStarRef} \ 
+#     --genomeFastaFiles ${fileRef} \
+#     --sjdbGTFfile ${pathRef}/gencode-v19-chr.gtf \
+#     --sjdbOverhang 75 \
+#     --runThreadN ${intCPUs}
+
+
+#####
+
+# STAR 2-PASS MAPPING
+
+# First pass STAR alignment for single reads (1 input).
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func01StarPass1.sh' \
+     :::: ${pathWd}/${fileInd}.${LSB_JOBINDEX}
+
+
+# Find all files with wildcard+name (SJ suffix) in current and subdirectories, and save to a TXT file.
+find . -name "*SJ.out.tab" -type f -printf '%f\n' > ASE02_aa_sj.txt
+
+
+# Second pass STAR alignment for single reads (1 input).  Using SJ files from first pass for option --sjdbFileChrStartEnd (see called script).
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func02StarPass2.sh' \
+     :::: ${pathWd}/${fileInd}.${LSB_JOBINDEX}
+
+
+# Notes
+     # 2-pass STAR mapping is recommended for increased sensitivity in discovering novel junctions.  The second pass collects all the annotated junctions generated by the first pass of aligning reads, inserts them into a private copy of the provided reference genome, then re-maps the reads against this personalized genome index.  This allows more splice reads to be mapped to novel junctions.
+     # Paired reads will need 2 inputs (one for each direction).  May need to build in a test/conditional.
+     # Printing results of find with the directory information stripped because of quirk where setting the script's working directory doesn't seem to change the shell's working directory, so "." is interpreted weirdly by the ERISOne cluster.
+     # Using find instead of ls when sort order doesn't matter because it's recommended to avoid parsing with ls because it doesn't handle strange characters as well (though that probably doesn't actually matter here).
+
+
+#####
+
+# PROCESS MAPPED READS FOR GATK HAPLOTYPE CALLER
+
+# Format and recalibrate quality scores with Picard and GATK
+find . -name "*starP2*Aligned.out.bam" -type f -printf '%f\n' \
+     > ASE02_aa_starBam.txt
+
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func03PicGatk.sh' \
+     :::: ASE02_aa_starBam.txt
+
+
+# Create list of BAM files per individual and index with samtools
+find . -name "*6GatkBQSR*.bam" -type f -printf '%f\n' > ASE02_aa_bqsrBams.txt
+
+${parallel} -j ${intCPUs} 'samtools index {1}' :::: ASE02_aa_bqsrBams.txt
+
+
+# Merge files by chromosome with samtools
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func04MergeBam.sh' :::: ${fileChrList}
+
+
+# Re-index with samtools (not Picard!  Haplotype Caller wants samtools index - I think Picard may have issues with the file-processing history in the headers).
+find . -name "ASE02f04*_merged.bam" -type f -printf '%f\n' \
+     > ASE02_aa_mergedBams.txt
+
+${parallel} -j ${intCPUs} 'samtools index {1}' :::: ASE02_aa_mergedBams.txt
+
+
+# Rename samtools index file for recognition by GATK (expects .bai, not .bam.bai)
+for file in ASE02f04*.bam.bai; do
+     mv "$file" "${file%.bam.bai}.bai"
+done
+
+
+#####
+
+# CALL VARIANTS JOINTLY PER CHROMOSOME WITH GATK HAPLOTYPE CALLER
+
+while IFS= read -r chr ; do
+     java -jar ${GATK} -T HaplotypeCaller \
+          -R ${fileRef} \
+          -I ASE02f04_${pathInd}_${chr}_merged.bam \
+          --dontUseSoftClippedBases \
+          -stand_call_conf 20.0 \
+          -stand_emit_conf 20.0 \
+          -o ASE02f05_${pathInd}_${chr}_raw.vcf \
+          &> ASE02f05_hapCallLog_${pathInd}_${chr}.txt
+done < ${fileChrList}
+
+
+# Notes
+     # GATK Haplotype Caller has issues with multithreading, so it's necessary to run it without the -nct option or GNU parallel.  Otherwise it aborts run (and doesn't respect its place in the script - it jumps ahead and tries to run as soon as possible.  But it does obey the job array, which has similarities to Queue).  But I suspect the efficiency is still close to max because I think it uses all the available RAM even when single-threaded.  I've tried running it with 40 GB of RAM reserved, but since this is by chromosome, it might run with less...probably depends mostly on the number of samples per individual.
+     # May want change first line to "java -Xmx${intRAMmax}g -jar" to limit memory consumption.  I'm not sure if reserving the memory via LSF automatically caps the memory usage.
+     # Takes 5-6 hours per job with 3 FASTQ files/individual and the 25 main chromosomes from hg19 (M, 1-22, X, and Y).
+
+
+#####
+
+# FILTERING VARIANTS IN CALLED HAPLOTYPES
+
+# Sort and merge chromosome haplotypes for compatibility with GATK
+rm ASE02_aa_rawVcfs.txt
+
+while IFS= read -r chr ; do
+     (find . -name "ASE02f05_${pathInd}_${chr}_raw.vcf" -type f -printf '%f\n') \
+     >> ASE02_aa_rawVcfs.txt
+done < ${fileChrList}
+
+readarray -t rawVcfs < ASE02_aa_rawVcfs.txt
+
+${bcftools} concat \
+     -o ASE02f06_${pathInd}_output.all_chrs.raw.sorted.vcf \
+     -O v \
+     ${rawVcfs[*]}
+
+
+# Notes
+     # Sorting with shell script because Picard's ReorderSam requires all chromosomes in reference file, not just main 25 (or other subset).  Can get the order of chromosomes GATK wants by running an unsorted file and getting the list from GATK's error log.
+
+
+#####
+
+# Filter for SNP clusters with GATK
+java -jar ${GATK} -T VariantFiltration \
+     -R ${fileRef} \
+     -V ASE02f06_${pathInd}_output.all_chrs.raw.sorted.vcf \
+     -window 35 \
+     -cluster 2 \
+     -o ASE02f07_${pathInd}_output.all_chrs.filtSNPclstr.vcf \
+     &> ASE02f07_${pathInd}_output.all_chrs.filtSNPclstr.log
+
+
+# Notes
+     #  Filtering out SNP clusters because having multiple SNPs (in this case, 2 or more) within 35 bases of each other can cause problems with read mapping, which could generate false ASE hits.
+
+
+#####
+
+     # ASE02f08: Filtering out SNPs in problematic regions with Piskol et al. filters (http://lilab.stanford.edu/SNPiR/, Piskol, R., Ramaswami, G. & Li, J. B. Reliable identification of genomic variants from RNA-seq data. Am. J. Hum. Genet. 93, 641–651 (2013)).
+     # SNPiR README: http://lilab.stanford.edu/SNPiR/readme
+
+
+##### !!! MANUAL MODIFICATION REQUIRED !!! #####
+
+     # For this pipeline, it's necessary to set the $FASTAFROMBED variable to the path for [bedtools getfasta] in the the config.pm file of the SNPiR package.  (Setting the other variables is currently unnecessary.)
+
+
+#####
+
+# Move into SNPiR folder with Piskol scripts
+cd ${SNPiR}
+
+
+# 1) Remove indels
+vcftools --vcf ${pathWd}/${pathInd}/ASE02f06_${pathInd}_output.all_chrs.raw.sorted.vcf \
+     --remove-indels \
+     --recode \
+     --recode-INFO-all \
+     --out ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel \
+     &> ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.log
+
+
+# 2) Convert list of non-indel variants from VCF to TXT, filtered by min base quality score of 20
+sh convertVCF.sh \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.recode.vcf \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.recode.txt \
+     20
+
+
+# 3) Reformat TXT to BED for bedtools
+awk '{print $1"\t"$2-1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6}' \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.recode.txt \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.bed
+
+
+# 4) Mark SNPs in repetitive regions based on RepeatMasker annotation
+bedtools intersect \
+     -a ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.bed \
+     -b ${pathRef}/RepeatMasker_UCSCtab_hg19_Nov2014.sorted.bed \
+     -v \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.bed
+
+
+# 5) Revert format back to TXT
+awk '{print $1"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7}' \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.bed \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.txt
+
+
+# 6) Mark intronic SNPs within 4 bp of splicing junctions
+perl filter_intron_near_splicejuncts.pl \
+     -infile ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.txt \
+     -outfile ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.txt \
+     -genefile ${pathRef}/UCSCgenes_knowGene_hg19_Nov2014.SNPiRformat.txt
+
+
+# 7) Mark SNPs in homopolymer (single NT) runs
+perl filter_homopolymer_nucleotides.pl \
+     -infile ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.txt \
+     -outfile ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.txt \
+     -refgenome ${fileRef}
+
+
+# 8) Convert TXT to BED
+awk '{print $1"\t"$2-1"\t"$2"\t"$3"\t"$4"\t"$5"\t"$6}' \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.txt \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.bed
+
+
+# 9) Use bedtools to filter out SNPs at known RNA editing sites
+bedtools intersect \
+     -a ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.bed \
+     -b ${pathRef}/darned_UCSCtab_Nov2014.bed \
+     -v \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.rmedt.bed
+
+# 10) Convert BED to TXT
+awk '{print $1"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7}' \
+     ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.rmedt.bed \
+     > ${pathWd}/${pathInd}/ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.rmedt.txt
+
+
+# Notes
+     # Moving into SNPiR folder with Piskol scripts because the scripts search for the config.pm file in 1) the current directory, or 2) where the system expects perl scripts to be.  It's easier to simply work from within the SNPiR directory than to modify where the system expects scripts to be (or try to put the scripts where the system expects them to be).
+
+     # Filtering steps are in the order recommended by the SNPiR README.
+     
+     # Skipping the following recommended steps:
+          # 1) removing mismatches in first 6 bp of reads and 
+          # 2) BLAT step that checks for uniquely mapping reads.
+     # Maria said these scripts were being problematic - possibly related to config.pm file?
+
+     # 1) vcftools: Removing indels to focus analyses on SNPs.  Writing out variants that pass filter to new file with --recode.  "Use --recode-INFO-all to include all data from the INFO fields in the output. By default INFO fields are not written because many filters will alter the variants in a file, rendering the INFO values incorrect." -http://vcftools.sourceforge.net/documentation.html
+
+     # 4 & 9) bedtools intersect -v: Only report those entries in A that have no overlap in B.
+
+
+#####
+
+# Move from SNPiR directory back to individual's directory
+cd ${pathWd}/${pathInd}
+
+# Combine GATK and Piskol/bedtools filters
+perl ${pathSubscriptsMaria}/create_piskolFilt_vcf.pl \
+     ASE02f08_${pathInd}_output.all_chrs.rmIndel.rmsk.rmintron.rmhom.rmedt.txt \
+     ASE02f07_${pathInd}_output.all_chrs.filtSNPclstr.vcf \
+     > ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.vcf
+
+
+##### 
+
+# Maria noted: GQ filter? This one I every time I try it doesn't really help, so not necessary 
+     # perl $scripts/filter_vcf_byGQ.pl output.all_chrs.filtSNPclstr.filtPiskol.vcf > output.all_chrs.filtSNPclstr.filtPiskol.filtGQ.vcf 
+#echo "Done filtering by genotype qual..."
+
+
+#####
+
+# Mark SNPs that are biallelic (heterozygous) in order to measure ASE
+java -jar ${GATK} -T SelectVariants \
+   -R ${fileRef} \
+   --variant ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.vcf \
+   -o ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.vcf \
+   -restrictAllelesTo BIALLELIC
+
+
+# Filter out homozygous sites
+perl ${pathSubscriptsMaria}/filter_vcf_byHets.pl \
+     ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.vcf \
+     > ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.filtHom.vcf
+
+
+#####
+
+# Select all calls made by both our process and in dbSNP
+java -Xmx2g -jar ${GATK} -T SelectVariants \
+   -R ${fileRef} \
+   --variant ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.filtHom.vcf \
+   --concordance ${pathRef}/dbsnp_138.hg19.vcf \
+   -o ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.filtHom.dbsnp.vcf
+
+
+# Notes
+     # Since this mark is used for filtering, this limits our called variants to the ones already found in dbSNP.  This is done in order to decrease the rate of false positives (Maria said it went from 10% to 5% after adding this requirement).
+
+
+#####
+
+# Remove SNPs marked by filters
+grep "0/1" ASE02f09_${pathInd}_output.all_chrs.filtSNPclstr.filtPiskol.biallel.filtHom.dbsnp.vcf \
+     | grep PASS \
+     > ASE02f09_${pathInd}_hets_allFilts.vcf
+
+
+#####
+
+# FORMAT FILTERED DATA
+
+# Add "snp_chr_loc" tag (ID) to SNPs that passed filters
+perl ${pathSubscriptsMaria}/add_ids_vcf.pl \
+     ASE02f09_${pathInd}_hets_allFilts.vcf \
+     > ASE02f10_${pathInd}_hets_allFilts.ids.vcf
+
+
+#####
+
+# GENERATE QUALITY CONTROL CHECKS ON VARIANT CALL PIPELINE
+
+# Generate list of all filter outputs
+ls -1 *output*.vcf > ASE02_aa_vcfs2evalList.txt
+
+
+# Check for SNP overlap with dbSNP (should be 100% since we filtered for this) and 1000 Genomes.
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func11GatkEval.sh' \
+     :::: ASE02_aa_vcfs2evalList.txt
+
+
+# Get summary stats from evaluation output
+perl ${pathSubscriptsMaria}/parse_gatk_eval_report.pl \
+     ASE02f12_${pathInd}_summary_eval_1KGP.txt \
+     *eval.*_1KGP
+
+perl ${pathSubscriptsMaria}/parse_gatk_eval_report.pl \
+     ASE02f12_${pathInd}_summary_eval_dbsnp.txt \
+     *eval.*_dbsnp
+
+
+#####
+
+# VARIANT CALLING COMPLETE.
+
+# INITIATE ASE ANALYSIS.
+
+#####
+
+# MAP READS TO PERSONALIZED MASKED GENOME WITH SUBREAD
+
+# Convert VCF of filtered SNPs to BED
+perl ${pathSubscriptsMaria}/vcf2bed.pl \
+     ASE02f10_${pathInd}_hets_allFilts.ids.vcf \
+     > ASE02f13_1vcf2Bed_${pathInd}.bed
+
+
+# Mask the reference genome at the filtered SNP sites
+bedtools maskfasta \
+     -fi ${fileRef} \
+     -bed ASE02f13_1vcf2Bed_${pathInd}.bed \
+     -fo ASE02f13_2createGenomeMask_${pathInd}.fa
+
+
+# Generate a new reference genome with subread using the masked genome
+${subread}/subread-buildindex \
+     -o hg19-masked-subread \
+     ASE02f13_2createGenomeMask_${pathInd}.fa
+
+
+# Map reads to personalized reference genome with subread
+find . -name "*.fastq" -type f -printf '%f\n' \
+     > ASE02_aa_fastq.txt
+
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func13AlignToMaskedGenome.sh' \
+     :::: ASE02_aa_fastq.txt
+
+
+# Notes
+     # Reducing variant-induced mapping biases by generating a personalized genome for each individual that masks their called variants (heterozygous SNP sites), then mapping reads to the masked genome with subread.
+     # Maria previously looked at how the reads mapped with subread vs. the STAR 2-pass in IGV (Integrative Genomics Viewer, Broad Institute) and noted that subread maps more reads than STAR.  This makes sense because subread is more permissive than STAR 2-pass (no need to adjust for splice junctions).  For counting the reads, Soumya thinks it's fair to use an alternative aligner.  I think it'd be interesting to compare both subread and STAR 2-pass, because both are being used to select for unique reads, and STAR is probably more accurate (so subread maps more reads, but more likely to the wrong loci).  However, I feel this is a minor issue for ASE compared with the Haplotype Caller being designed for a 50:50 allele-expression ratio (vs. MuTect, which is also from the Broad but was developed for detecting somatic point mutations from cancer samples, and is therefore a bit more forgiving about unusual allele expression ratios), so if I'm going to start really revamping things, I'll start there.
+     # (Plus, Maria's ASE script is designed for subread - uses the subread QS symbols, which aren't shared by subjunc or STAR - so I'd really need to do some re-coding if I start fiddling around here!)
+
+
+#####
+
+# RUN ANALYSIS FOR ALLELE-SPECIFIC EXPRESSION (ASE)
+find . -name "ASE02f13_3subreadAligned_*.bam" -type f -printf '%f\n' \
+     > ASE02_aa_subreadAligned.txt
+
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func14ASE.sh' \
+     :::: ASE02_aa_subreadAligned.txt
+
+
+# Notes 
+     # Quantifying ASE with a script Maria modified from http://montgomerylab.stanford.edu/resources/kukurba2013/index.html
+
+
+#####
+
+# MARK ASE OUTPUT FOR FURTHER FILTERING
+
+# Scale "duplicate" groups and weigh reads within them when at ASE sites
+find . -name "ASE02f14_5SamASE_*.ASE.txt" -type f -printf '%f\n' \
+     > ASE02_aa_ASE.txt
+
+${parallel} -j ${intCPUs} --joblog --resume-failed --keep-order \
+     'sh ${pathSubscripts}/RNA-ASE-02_func15MarkDupsASEOutput.sh' \
+     :::: ASE02_aa_ASE.txt
+
+
+# Notes
+     # Maria and Soumya believe that sometimes reads that start at the same site, and therefore appear to be PCR duplicates, may actually be genuine.  While this is unlikely to happen during whole-genome sequencing, mRNA sequencing apparently uses primers which bind to the 3' UTR (immediately upstream of the poly-A tail).  Since these primers are meant to bind to a semi-conserved region, the chance of unique reads having the start position is increased.  (Also, since the reads are biallelic, they're clearly not true duplicates.)
+     # To account for these reads without over-counting PCR duplicates, they came up with the following strategy:
+          # At a given heterozygous SNP, there may be multiple overlapping reads, including a block of PCR "duplicates."
+          # A "PCR duplicate block" is treated as one event.
+          # Every unique overlapping read is treated as one event.
+          # Every event is multiplied by 100 (scaled to 100 counts/event).
+          # This results in units of 100 "counts"/event, and in ref and alt alleles in PCR duplicate blocks being weighted as partial events.
+          # This has the side effect of increasing the deviance when analyzing by logistic regression.  Will be dividing the deviance by 100 to correct for this.
+
+
+#####
+
+# Mark SNPs in regions that are difficult to map
+bedtools intersect \
+     -a ASE02f13_1vcf2Bed_${pathInd}.bed \
+     -b ${pathRef}/wgEncodeCrgMapabilityAlign75mer_lowMap.bed \
+     -wa \
+     > ASE02f16_1wgEncodeLowMapVars_${pathInd}.bed
+
+
+# Mark SNPs that are known to induce mapping biases (which could generate artificial ASE)
+bedtools intersect \
+     -a ASE02f13_1vcf2Bed_${pathInd}.bed \
+     -b ${pathRef}/EUR01_50bp_result_stats_05bias.bed \
+     -wa \
+     > ASE02f16_2PanousisBiasVars_${pathInd}.bed
+
+
+# Extract and concatenate lists of problematic SNPs
+cut -f4 ASE02f16_1wgEncodeLowMapVars_${pathInd}.bed \
+     > ASE02f16_3problematicSNPs_${pathInd}.txt
+     
+cut -f4 ASE02f16_2PanousisBiasVars_${pathInd}.bed \
+     >> ASE02f16_3problematicSNPs_${pathInd}.txt
+
+
+# Remove duplicate problematic SNPs using the "unique" option for sort
+sort -u ASE02f16_3problematicSNPs_${pathInd}.txt \
+     > ASE02f17_uniqueProblematicSNPs_${pathInd}.txt
+
+
+# Print number of lines (= number of problematic SNPs)
+echo
+wc -l ASE02f17_uniqueProblematicSNPs_${pathInd}.txt
+
+
+# Notes
+     # bedtools intersect -wa: Write the original entry in A for each overlap.
+     # bedtools 2.21 can search for intersections between multiple databases, but since we're only looking through two, it's not that inconvenient to load the cluster version and do them sequentially.
+     # "An even more difficult caveat in AE analysis is allelic mapping bias: in RNA-seq data aligned to the reference genome, a read carrying the alternative allele of a variant has at least one mismatch, and thus has a lower probability to align correctly than the reference reads [26–28]. Simulated data in Panousis et al. [27] indicates substantial variation between sites — in most cases reads mapped correctly, but 12 % of SNPs and 46 % of indels had allele ratio bias >5 % with some having a full loss of mapping of the alternative allele. Loci with homology elsewhere in the genome are particularly problematic as reads have nearly equally good alternative loci to align to. Furthermore, even a site with no bias in itself can become biased due to a flanking (sometimes unknown) variant that shares overlapping reads with the site of interest. In addition, mapping bias varies depending on the specific alignment software used (Additional file 5)." --Castel, S. E., Levy-Moonshine, A., Mohammadi, P., Banks, E. & Lappalainen, T. Tools and best practices for allelic expression analysis. bioRxiv 016097 (2015). doi:10.1101/016097
+
+
